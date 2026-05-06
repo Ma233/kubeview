@@ -2,9 +2,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct ListPodsInput {
     pub namespace: Option<String>,
+    #[serde(default)]
     pub all_namespaces: bool,
     pub label_selector: Option<String>,
     pub field_selector: Option<String>,
@@ -12,13 +13,13 @@ pub struct ListPodsInput {
     pub continue_token: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct GetPodInput {
     pub name: String,
     pub namespace: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct PodLogsInput {
     pub pod: String,
     pub namespace: Option<String>,
@@ -26,11 +27,12 @@ pub struct PodLogsInput {
     pub tail_lines: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct ListResourcesInput {
     pub api_version: String,
     pub kind: String,
     pub namespace: Option<String>,
+    #[serde(default)]
     pub all_namespaces: bool,
     pub label_selector: Option<String>,
     pub field_selector: Option<String>,
@@ -38,7 +40,7 @@ pub struct ListResourcesInput {
     pub continue_token: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct GetResourceInput {
     pub api_version: String,
     pub kind: String,
@@ -46,9 +48,10 @@ pub struct GetResourceInput {
     pub namespace: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct ListEventsInput {
     pub namespace: Option<String>,
+    #[serde(default)]
     pub all_namespaces: bool,
     pub involved_kind: Option<String>,
     pub involved_name: Option<String>,
@@ -98,24 +101,26 @@ impl RolloutKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct TraceServiceInput {
     pub name: String,
     pub namespace: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct ListJobsInput {
     pub namespace: Option<String>,
+    #[serde(default)]
     pub all_namespaces: bool,
     pub label_selector: Option<String>,
     pub field_selector: Option<String>,
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct ListCronJobsInput {
     pub namespace: Option<String>,
+    #[serde(default)]
     pub all_namespaces: bool,
     pub label_selector: Option<String>,
     pub field_selector: Option<String>,

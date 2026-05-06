@@ -30,6 +30,10 @@ cargo run -- serve \
 
 If `--namespace` is set, kubeview restricts namespace-scoped reads to that namespace and rejects all-namespaces reads. Cluster-scoped resources are also rejected while a namespace scope is active.
 
+If you expose kubeview on a non-loopback interface and want clients to connect through a specific authority, add one or more `--allowed-host` values that match the incoming HTTP `Host` header. When `--allowed-host` is omitted, kubeview keeps rmcp's default loopback-only host allowlist.
+
+The MCP HTTP path must be a non-root path such as `/mcp`. The root path `/` is rejected.
+
 ## MCP Client Configuration
 
 Use the streamable HTTP endpoint from your MCP client:
@@ -71,10 +75,22 @@ Run a released image with a read-only kubeconfig mount:
 
 ```bash
 docker run --rm \
-  -p 3000:3000 \
+  -p 127.0.0.1:3000:3000 \
   -v "$HOME/.kube/config:/home/kubeview/.kube/config:ro" \
   ghcr.io/ma233/kubeview:latest \
   serve --host 0.0.0.0 --port 3000
+```
+
+To accept requests through a non-loopback authority, publish the port as needed and pass explicit allowed hosts:
+
+```bash
+docker run --rm \
+  -p 3000:3000 \
+  -v "$HOME/.kube/config:/home/kubeview/.kube/config:ro" \
+  ghcr.io/ma233/kubeview:latest \
+  serve --host 0.0.0.0 --port 3000 \
+  --allowed-host mcp.example.com \
+  --allowed-host mcp.example.com:3000
 ```
 
 ## Development
@@ -97,5 +113,7 @@ pre-commit run --all-files
 ## Security Model
 
 kubeview is intentionally read-only. It never creates, updates, patches, deletes, or executes resources in the cluster. Kubernetes RBAC still applies, so run it with a kubeconfig whose permissions match the access you want MCP clients to have.
+
+For HTTP transport safety, kubeview validates the request `Host` header against rmcp's loopback defaults unless you provide explicit `--allowed-host` entries.
 
 For rollout and batch observability, the kubeconfig needs read access to the relevant namespaces for Pods, Events, Services, EndpointSlices, Deployments, StatefulSets, DaemonSets, Jobs, and CronJobs.
