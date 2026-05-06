@@ -1,3 +1,6 @@
+use rmcp::handler::server::tool::IntoCallToolResult;
+use rmcp::model::CallToolResult;
+use rmcp::model::Content;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,5 +36,11 @@ impl From<kube::config::KubeconfigError> for KubeviewError {
 impl From<kube::config::InferConfigError> for KubeviewError {
     fn from(error: kube::config::InferConfigError) -> Self {
         Self::Config(error.to_string())
+    }
+}
+
+impl IntoCallToolResult for KubeviewError {
+    fn into_call_tool_result(self) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(CallToolResult::error(vec![Content::text(self.to_string())]))
     }
 }

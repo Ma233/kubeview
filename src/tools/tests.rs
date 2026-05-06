@@ -2,13 +2,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use poem_mcpserver::McpServer;
-use poem_mcpserver::protocol::JSON_RPC_VERSION;
-use poem_mcpserver::protocol::rpc::Request;
-use poem_mcpserver::protocol::rpc::RequestId;
-use poem_mcpserver::protocol::rpc::Requests;
-use poem_mcpserver::protocol::tool::ToolsCallRequest;
-use poem_mcpserver::protocol::tool::ToolsListRequest;
+use rmcp::ClientHandler;
+use rmcp::ServiceExt;
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::ClientInfo;
 use serde_json::json;
 
 use super::*;
@@ -52,7 +49,7 @@ impl KubernetesReader for MockReader {
     }
 
     async fn list_pods(&self, input: ListPodsInput) -> Result<PodsResponse, KubeviewError> {
-        *self.list_pods_input.lock().unwrap() = Some(input.clone());
+        *self.list_pods_input.lock().expect("list_pods_input lock") = Some(input.clone());
         Ok(PodsResponse {
             namespace: input.namespace,
             pods: vec![],
@@ -99,7 +96,10 @@ impl KubernetesReader for MockReader {
     }
 
     async fn list_events(&self, input: ListEventsInput) -> Result<EventsResponse, KubeviewError> {
-        *self.list_events_input.lock().unwrap() = Some(input.clone());
+        *self
+            .list_events_input
+            .lock()
+            .expect("list_events_input lock") = Some(input.clone());
         Ok(EventsResponse {
             namespace: input.namespace,
             events: vec![],
@@ -190,28 +190,35 @@ impl KubernetesReader for MockReader {
     }
 }
 
+struct DummyClientHandler;
+
+impl ClientHandler for DummyClientHandler {
+    fn get_info(&self) -> ClientInfo {
+        ClientInfo::default()
+    }
+}
+
 #[tokio::test]
-async fn tools_list_exposes_minimal_core_tools() {
+async fn tools_list_exposes_minimal_core_tools() -> anyhow::Result<()> {
     let reader = Arc::new(MockReader::default());
-    let mut server = McpServer::new().tools(KubeTools::new(reader));
+    let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-    let response = server
-        .handle_request(Request {
-            jsonrpc: JSON_RPC_VERSION.to_string(),
-            id: Some(RequestId::Int(1)),
-            body: Requests::ToolsList {
-                params: ToolsListRequest { cursor: None },
-            },
-        })
-        .await;
-    let value = serde_json::to_value(response).unwrap();
-    let tools = value["result"]["tools"].as_array().unwrap();
+    let server_handle = tokio::spawn(async move {
+        KubeTools::new(reader)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
+
+    let client = DummyClientHandler.serve(client_transport).await?;
+    let tools = client.list_tools(None).await?.tools;
     let names = tools
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
+        .into_iter()
+        .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-
-    assert_eq!(names, vec![
+    let mut expected = vec![
         "list_contexts",
         "current_context",
         "list_namespaces",
@@ -226,38 +233,55 @@ async fn tools_list_exposes_minimal_core_tools() {
         "trace_service",
         "list_jobs",
         "list_cronjobs",
-    ]);
+    ];
+    expected.sort_unstable();
+
+    assert_eq!(names, expected);
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
 }
 
 #[tokio::test]
-async fn list_pods_maps_optional_arguments() {
+async fn list_pods_maps_optional_arguments() -> anyhow::Result<()> {
     let reader = Arc::new(MockReader::default());
-    let mut server = McpServer::new().tools(KubeTools::new(reader.clone()));
+    let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-    let response = server
-        .handle_request(Request {
-            jsonrpc: JSON_RPC_VERSION.to_string(),
-            id: Some(RequestId::Int(2)),
-            body: Requests::ToolsCall {
-                params: ToolsCallRequest {
-                    name: "list_pods".to_string(),
-                    arguments: json!({
-                        "namespace": "prod",
-                        "all_namespaces": true,
-                        "label_selector": "app=web",
-                        "field_selector": "status.phase=Running",
-                        "limit": 50,
-                        "continue_token": "next-page"
-                    }),
-                },
-            },
-        })
-        .await;
+    let server_handle = tokio::spawn({
+        let reader = reader.clone();
+        async move {
+            KubeTools::new(reader)
+                .serve(server_transport)
+                .await?
+                .waiting()
+                .await?;
+            anyhow::Ok(())
+        }
+    });
 
-    let value = serde_json::to_value(response).unwrap();
-    assert_eq!(value["result"]["isError"], false);
+    let client = DummyClientHandler.serve(client_transport).await?;
+    let response = client
+        .call_tool(
+            CallToolRequestParams::new("list_pods").with_arguments(
+                json!({
+                    "namespace": "prod",
+                    "all_namespaces": true,
+                    "label_selector": "app=web",
+                    "field_selector": "status.phase=Running",
+                    "limit": 50,
+                    "continue_token": "next-page"
+                })
+                .as_object()
+                .expect("list_pods arguments object")
+                .clone(),
+            ),
+        )
+        .await?;
+
+    assert_eq!(response.is_error, Some(false));
     assert_eq!(
-        *reader.list_pods_input.lock().unwrap(),
+        *reader.list_pods_input.lock().expect("list_pods_input lock"),
         Some(ListPodsInput {
             namespace: Some("prod".to_string()),
             all_namespaces: true,
@@ -267,37 +291,54 @@ async fn list_pods_maps_optional_arguments() {
             continue_token: Some("next-page".to_string()),
         })
     );
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
 }
 
 #[tokio::test]
-async fn list_events_maps_optional_arguments() {
+async fn list_events_maps_optional_arguments() -> anyhow::Result<()> {
     let reader = Arc::new(MockReader::default());
-    let mut server = McpServer::new().tools(KubeTools::new(reader.clone()));
+    let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-    let response = server
-        .handle_request(Request {
-            jsonrpc: JSON_RPC_VERSION.to_string(),
-            id: Some(RequestId::Int(3)),
-            body: Requests::ToolsCall {
-                params: ToolsCallRequest {
-                    name: "list_events".to_string(),
-                    arguments: json!({
-                        "namespace": "prod",
-                        "all_namespaces": true,
-                        "involved_kind": "Pod",
-                        "involved_name": "web-0",
-                        "type_": "Warning",
-                        "limit": 50
-                    }),
-                },
-            },
-        })
-        .await;
+    let server_handle = tokio::spawn({
+        let reader = reader.clone();
+        async move {
+            KubeTools::new(reader)
+                .serve(server_transport)
+                .await?
+                .waiting()
+                .await?;
+            anyhow::Ok(())
+        }
+    });
 
-    let value = serde_json::to_value(response).unwrap();
-    assert_eq!(value["result"]["isError"], false);
+    let client = DummyClientHandler.serve(client_transport).await?;
+    let response = client
+        .call_tool(
+            CallToolRequestParams::new("list_events").with_arguments(
+                json!({
+                    "namespace": "prod",
+                    "all_namespaces": true,
+                    "involved_kind": "Pod",
+                    "involved_name": "web-0",
+                    "type_": "Warning",
+                    "limit": 50
+                })
+                .as_object()
+                .expect("list_events arguments object")
+                .clone(),
+            ),
+        )
+        .await?;
+
+    assert_eq!(response.is_error, Some(false));
     assert_eq!(
-        *reader.list_events_input.lock().unwrap(),
+        *reader
+            .list_events_input
+            .lock()
+            .expect("list_events_input lock"),
         Some(ListEventsInput {
             namespace: Some("prod".to_string()),
             all_namespaces: true,
@@ -307,62 +348,90 @@ async fn list_events_maps_optional_arguments() {
             limit: Some(50),
         })
     );
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
 }
 
 #[tokio::test]
-async fn reader_error_becomes_mcp_tool_error() {
+async fn reader_error_becomes_mcp_tool_error() -> anyhow::Result<()> {
     let reader = Arc::new(MockReader {
         fail_namespaces: true,
         ..MockReader::default()
     });
-    let mut server = McpServer::new().tools(KubeTools::new(reader));
+    let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-    let response = server
-        .handle_request(Request {
-            jsonrpc: JSON_RPC_VERSION.to_string(),
-            id: Some(RequestId::Int(4)),
-            body: Requests::ToolsCall {
-                params: ToolsCallRequest {
-                    name: "list_namespaces".to_string(),
-                    arguments: json!({}),
-                },
-            },
-        })
-        .await;
+    let server_handle = tokio::spawn(async move {
+        KubeTools::new(reader)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
 
-    let value = serde_json::to_value(response).unwrap();
-    assert_eq!(value["result"]["isError"], true);
-    assert_eq!(value["result"]["content"][0]["text"], "forbidden");
+    let client = DummyClientHandler.serve(client_transport).await?;
+    let response = client
+        .call_tool(CallToolRequestParams::new("list_namespaces"))
+        .await?;
+
+    assert_eq!(response.is_error, Some(true));
+    assert_eq!(
+        response
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.as_str()),
+        Some("forbidden")
+    );
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
 }
 
 #[tokio::test]
-async fn invalid_rollout_kind_becomes_mcp_tool_error() {
+async fn invalid_rollout_kind_becomes_mcp_tool_error() -> anyhow::Result<()> {
     let reader = Arc::new(MockReader::default());
-    let mut server = McpServer::new().tools(KubeTools::new(reader));
+    let (server_transport, client_transport) = tokio::io::duplex(4096);
 
-    let response = server
-        .handle_request(Request {
-            jsonrpc: JSON_RPC_VERSION.to_string(),
-            id: Some(RequestId::Int(5)),
-            body: Requests::ToolsCall {
-                params: ToolsCallRequest {
-                    name: "get_rollout_status".to_string(),
-                    arguments: json!({
-                        "kind": "ReplicaSet",
-                        "name": "web",
-                        "namespace": "prod"
-                    }),
-                },
-            },
-        })
-        .await;
+    let server_handle = tokio::spawn(async move {
+        KubeTools::new(reader)
+            .serve(server_transport)
+            .await?
+            .waiting()
+            .await?;
+        anyhow::Ok(())
+    });
 
-    let value = serde_json::to_value(response).unwrap();
-    assert_eq!(value["result"]["isError"], true);
+    let client = DummyClientHandler.serve(client_transport).await?;
+    let response = client
+        .call_tool(
+            CallToolRequestParams::new("get_rollout_status").with_arguments(
+                json!({
+                    "kind": "ReplicaSet",
+                    "name": "web",
+                    "namespace": "prod"
+                })
+                .as_object()
+                .expect("get_rollout_status arguments object")
+                .clone(),
+            ),
+        )
+        .await?;
+
+    assert_eq!(response.is_error, Some(true));
     assert!(
-        value["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("unsupported rollout kind")
+        response
+            .content
+            .first()
+            .and_then(|content| content.raw.as_text())
+            .map(|text| text.text.contains("unsupported rollout kind"))
+            .unwrap_or(false)
     );
+
+    client.cancel().await?;
+    server_handle.await??;
+    Ok(())
 }
