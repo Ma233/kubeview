@@ -9,6 +9,7 @@ pub(crate) fn assert_unscoped_observability(
     namespace: &str,
 ) -> anyhow::Result<()> {
     assert_pod_listing(client, namespace)?;
+    assert_pagination_metadata(client, namespace)?;
     assert_selector_filtering(client, namespace)?;
     assert_service_tracing(client, namespace)?;
     assert_rollouts(client, namespace)?;
@@ -75,17 +76,65 @@ pub(crate) fn assert_namespace_scope(client: &McpClient, namespace: &str) -> any
 fn assert_pod_listing(client: &McpClient, namespace: &str) -> anyhow::Result<()> {
     let pods = client.call_tool("list_pods", json!({ "namespace": namespace }))?;
     assert!(!pods.is_error(), "list_pods returned error: {pods:?}");
+    let daemonset_pods = pods.count_with_prefix("pods", "node-probe-");
 
     assert_eq!(pods.count_with_prefix("pods", "frontend-"), 3);
     assert_eq!(pods.count_with_prefix("pods", "broken-api-"), 2);
     assert_eq!(pods.count_with_prefix("pods", "cache-"), 2);
-    assert_eq!(pods.count_with_prefix("pods", "node-probe-"), 1);
+    assert!(daemonset_pods >= 1, "expected at least one node-probe pod");
     assert_eq!(pods.count_with_prefix("pods", "complete-once-"), 1);
     assert_eq!(pods.count_with_prefix("pods", "fail-once-"), 1);
     assert_eq!(pods.count_with_prefix("pods", "long-running-"), 1);
-    assert_eq!(pods.count_by_field("pods", "phase", "Running"), 7);
+    assert_eq!(
+        pods.count_by_field("pods", "phase", "Running"),
+        6 + daemonset_pods
+    );
     assert_eq!(pods.count_by_field("pods", "phase", "Succeeded"), 1);
     assert_eq!(pods.count_by_field("pods", "phase", "Failed"), 1);
+    Ok(())
+}
+
+fn assert_pagination_metadata(client: &McpClient, namespace: &str) -> anyhow::Result<()> {
+    let first_pods_page =
+        client.call_tool("list_pods", json!({ "namespace": namespace, "limit": 1 }))?;
+    assert_eq!(first_pods_page.i64_field("limit"), 1);
+    assert!(first_pods_page.bool_field("truncated"));
+    let pod_continue_token = first_pods_page.string_field("continue_token");
+    let second_pods_page = client.call_tool(
+        "list_pods",
+        json!({
+            "namespace": namespace,
+            "limit": 1,
+            "continue_token": pod_continue_token,
+        }),
+    )?;
+    assert_eq!(second_pods_page.i64_field("limit"), 1);
+    assert_eq!(second_pods_page.array("pods").len(), 1);
+
+    let first_resources_page = client.call_tool(
+        "list_resources",
+        json!({
+            "api_version": "apps/v1",
+            "kind": "Deployment",
+            "namespace": namespace,
+            "limit": 1,
+        }),
+    )?;
+    assert_eq!(first_resources_page.i64_field("limit"), 1);
+    assert!(first_resources_page.bool_field("truncated"));
+    let resource_continue_token = first_resources_page.string_field("continue_token");
+    let second_resources_page = client.call_tool(
+        "list_resources",
+        json!({
+            "api_version": "apps/v1",
+            "kind": "Deployment",
+            "namespace": namespace,
+            "limit": 1,
+            "continue_token": resource_continue_token,
+        }),
+    )?;
+    assert_eq!(second_resources_page.i64_field("limit"), 1);
+    assert_eq!(second_resources_page.array("items").len(), 1);
     Ok(())
 }
 

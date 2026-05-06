@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ListMeta;
 use k8s_openapi::jiff::Timestamp;
 use kube::Api;
 use kube::Client;
@@ -211,7 +212,10 @@ impl KubernetesReader for KubeClientReader {
     async fn list_pods(&self, input: ListPodsInput) -> Result<PodsResponse, KubeviewError> {
         ensure_namespace_filter_not_conflicting(input.all_namespaces, input.namespace.as_deref())?;
         self.ensure_all_namespaces_allowed(input.all_namespaces)?;
-        let params = Self::list_params(input.label_selector, input.field_selector);
+        let limit = observability::resolve_list_limit(input.limit)?;
+        let params = Self::list_params(input.label_selector, input.field_selector)
+            .limit(limit)
+            .with_continue_token(input.continue_token.as_deref());
         let namespace = if input.all_namespaces {
             None
         } else {
@@ -225,9 +229,13 @@ impl KubernetesReader for KubeClientReader {
             .list(&params)
             .await
             .map_err(|error| KubeviewError::kubernetes_context("list pods", error))?;
+        let (continue_token, truncated) = pagination_metadata(&list.metadata);
         Ok(PodsResponse {
             namespace,
             pods: list.items.into_iter().map(pod_summary).collect(),
+            limit,
+            continue_token,
+            truncated,
         })
     }
 
@@ -278,7 +286,10 @@ impl KubernetesReader for KubeClientReader {
             &input.kind,
             input.namespace.as_deref(),
         )?;
-        let params = Self::list_params(input.label_selector, input.field_selector);
+        let limit = observability::resolve_list_limit(input.limit)?;
+        let params = Self::list_params(input.label_selector, input.field_selector)
+            .limit(limit)
+            .with_continue_token(input.continue_token.as_deref());
         let namespace = if input.all_namespaces || capabilities.scope == Scope::Cluster {
             None
         } else {
@@ -292,6 +303,7 @@ impl KubernetesReader for KubeClientReader {
             .list(&params)
             .await
             .map_err(|error| KubeviewError::kubernetes_context("list resources", error))?;
+        let (continue_token, truncated) = pagination_metadata(&list.metadata);
         let items = list
             .items
             .into_iter()
@@ -304,6 +316,9 @@ impl KubernetesReader for KubeClientReader {
             kind: input.kind,
             namespace,
             items,
+            limit,
+            continue_token,
+            truncated,
         })
     }
 
@@ -559,6 +574,25 @@ fn format_age(created_at: Timestamp, now: Timestamp) -> String {
     } else {
         format!("{}d", seconds / 86_400)
     }
+}
+
+trait ListParamsExt {
+    fn with_continue_token(self, continue_token: Option<&str>) -> Self;
+}
+
+impl ListParamsExt for ListParams {
+    fn with_continue_token(self, continue_token: Option<&str>) -> Self {
+        match continue_token {
+            Some(continue_token) => self.continue_token(continue_token),
+            None => self,
+        }
+    }
+}
+
+fn pagination_metadata(metadata: &ListMeta) -> (Option<String>, bool) {
+    let continue_token = metadata.continue_.clone();
+    let truncated = continue_token.is_some();
+    (continue_token, truncated)
 }
 
 pub(crate) fn pod_summary(pod: Pod) -> PodSummary {

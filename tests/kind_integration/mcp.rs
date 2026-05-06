@@ -104,8 +104,18 @@ impl McpClient {
         }
 
         let value: Value = serde_json::from_str(&response.body)?;
-        Ok(ToolResult(value[0]["result"].clone()))
+        Ok(ToolResult(json_rpc_result(&value)?.clone()))
     }
+}
+
+fn json_rpc_result(value: &Value) -> anyhow::Result<&Value> {
+    let response = value
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap_or(value);
+    response
+        .get("result")
+        .ok_or_else(|| anyhow::anyhow!("JSON-RPC response missing result: {value}"))
 }
 
 #[derive(Debug)]

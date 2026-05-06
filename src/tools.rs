@@ -97,6 +97,8 @@ impl KubeTools {
         all_namespaces: Option<bool>,
         label_selector: Option<String>,
         field_selector: Option<String>,
+        limit: Option<u32>,
+        continue_token: Option<String>,
     ) -> Result<StructuredContent<PodsResponse>, KubeviewError> {
         self.reader
             .list_pods(ListPodsInput {
@@ -104,6 +106,8 @@ impl KubeTools {
                 all_namespaces: all_namespaces.unwrap_or(false),
                 label_selector,
                 field_selector,
+                limit,
+                continue_token,
             })
             .await
             .map(StructuredContent)
@@ -141,6 +145,7 @@ impl KubeTools {
     }
 
     /// List resources by apiVersion and kind.
+    #[allow(clippy::too_many_arguments)]
     async fn list_resources(
         &self,
         api_version: String,
@@ -149,6 +154,8 @@ impl KubeTools {
         all_namespaces: Option<bool>,
         label_selector: Option<String>,
         field_selector: Option<String>,
+        limit: Option<u32>,
+        continue_token: Option<String>,
     ) -> Result<StructuredContent<ResourcesResponse>, KubeviewError> {
         self.reader
             .list_resources(ListResourcesInput {
@@ -158,6 +165,8 @@ impl KubeTools {
                 all_namespaces: all_namespaces.unwrap_or(false),
                 label_selector,
                 field_selector,
+                limit,
+                continue_token,
             })
             .await
             .map(StructuredContent)

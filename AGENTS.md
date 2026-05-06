@@ -55,6 +55,8 @@ clusters, not for changing them.
   when the caller may need to inspect fields.
 - For new list-style tools, prefer explicit filters and bounded output. Avoid fetching unbounded
   cluster-wide data by default.
+- If a list-style tool applies a server-side limit by default, expose truncation and pagination
+  metadata in the response so callers cannot mistake a partial page for a complete result.
 - Keep all tool behavior read-only and deterministic for the same Kubernetes API state.
 
 ## Tests

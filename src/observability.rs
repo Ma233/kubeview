@@ -18,6 +18,7 @@ const DEFAULT_ROLLOUT_INTERVAL_SECONDS: u64 = 5;
 const MIN_ROLLOUT_INTERVAL_SECONDS: u64 = 1;
 const MAX_ROLLOUT_TIMEOUT_SECONDS: u64 = 3_600;
 const DEFAULT_LIST_LIMIT: u32 = 200;
+const MIN_LIST_LIMIT: u32 = 1;
 const MAX_LIST_LIMIT: u32 = 1_000;
 
 fn time_to_string(time: Option<Time>) -> Option<String> {
@@ -48,6 +49,11 @@ pub(crate) fn resolve_rollout_interval(
 
 pub(crate) fn resolve_list_limit(limit: Option<u32>) -> Result<u32, KubeviewError> {
     let limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if limit < MIN_LIST_LIMIT {
+        return Err(KubeviewError::InvalidInput(format!(
+            "limit must be greater than or equal to {MIN_LIST_LIMIT}"
+        )));
+    }
     if limit > MAX_LIST_LIMIT {
         return Err(KubeviewError::InvalidInput(format!(
             "limit must be less than or equal to {MAX_LIST_LIMIT}"
@@ -75,11 +81,18 @@ mod tests {
     }
 
     #[test]
-    fn list_limit_defaults_and_rejects_values_above_limit() {
+    fn list_limit_defaults_and_rejects_values_outside_bounds() {
         assert_eq!(resolve_list_limit(None).unwrap(), DEFAULT_LIST_LIMIT);
+
+        let error = resolve_list_limit(Some(0)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("limit must be greater than or equal to")
+        );
 
         let error = resolve_list_limit(Some(MAX_LIST_LIMIT + 1)).unwrap_err();
 
-        assert!(error.to_string().contains("limit must be"));
+        assert!(error.to_string().contains("limit must be less than"));
     }
 }

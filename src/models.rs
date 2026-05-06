@@ -8,6 +8,8 @@ pub struct ListPodsInput {
     pub all_namespaces: bool,
     pub label_selector: Option<String>,
     pub field_selector: Option<String>,
+    pub limit: Option<u32>,
+    pub continue_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,8 @@ pub struct ListResourcesInput {
     pub all_namespaces: bool,
     pub label_selector: Option<String>,
     pub field_selector: Option<String>,
+    pub limit: Option<u32>,
+    pub continue_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +152,9 @@ pub struct NamespaceSummary {
 pub struct PodsResponse {
     pub namespace: Option<String>,
     pub pods: Vec<PodSummary>,
+    pub limit: u32,
+    pub continue_token: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -178,6 +185,9 @@ pub struct ResourcesResponse {
     pub kind: String,
     pub namespace: Option<String>,
     pub items: Vec<serde_json::Value>,
+    pub limit: u32,
+    pub continue_token: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

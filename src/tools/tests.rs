@@ -56,6 +56,9 @@ impl KubernetesReader for MockReader {
         Ok(PodsResponse {
             namespace: input.namespace,
             pods: vec![],
+            limit: input.limit.unwrap_or(200),
+            continue_token: None,
+            truncated: false,
         })
     }
 
@@ -82,6 +85,9 @@ impl KubernetesReader for MockReader {
             kind: input.kind,
             namespace: input.namespace,
             items: vec![],
+            limit: input.limit.unwrap_or(200),
+            continue_token: None,
+            truncated: false,
         })
     }
 
@@ -239,7 +245,9 @@ async fn list_pods_maps_optional_arguments() {
                         "namespace": "prod",
                         "all_namespaces": true,
                         "label_selector": "app=web",
-                        "field_selector": "status.phase=Running"
+                        "field_selector": "status.phase=Running",
+                        "limit": 50,
+                        "continue_token": "next-page"
                     }),
                 },
             },
@@ -255,6 +263,8 @@ async fn list_pods_maps_optional_arguments() {
             all_namespaces: true,
             label_selector: Some("app=web".to_string()),
             field_selector: Some("status.phase=Running".to_string()),
+            limit: Some(50),
+            continue_token: Some("next-page".to_string()),
         })
     );
 }
