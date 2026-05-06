@@ -1,0 +1,33 @@
+disallowed-methods = [
+    { path = "kube_client::api::Api::attach", reason = "kubeview is read-only; do not attach to Kubernetes resources.", allow-invalid = true },
+    { path = "kube_client::api::Api::create", reason = "kubeview is read-only; do not create Kubernetes resources." },
+    { path = "kube_client::api::Api::create_subresource", reason = "kubeview is read-only; do not create Kubernetes subresources." },
+    { path = "kube_client::api::Api::create_token_request", reason = "kubeview is read-only; do not create Kubernetes token requests." },
+    { path = "kube_client::api::Api::delete", reason = "kubeview is read-only; do not delete Kubernetes resources." },
+    { path = "kube_client::api::Api::delete_collection", reason = "kubeview is read-only; do not delete Kubernetes resources." },
+    { path = "kube_client::api::Api::exec", reason = "kubeview is read-only; do not exec into Kubernetes pods.", allow-invalid = true },
+    { path = "kube_client::api::Api::log_stream", reason = "kubeview only allows bounded pod log reads; do not add streaming logs." },
+    { path = "kube_client::api::Api::patch", reason = "kubeview is read-only; do not patch Kubernetes resources." },
+    { path = "kube_client::api::Api::patch_approval", reason = "kubeview is read-only; do not approve Kubernetes resources." },
+    { path = "kube_client::api::Api::patch_ephemeral_containers", reason = "kubeview is read-only; do not patch ephemeral containers." },
+    { path = "kube_client::api::Api::patch_metadata", reason = "kubeview is read-only; do not patch Kubernetes metadata." },
+    { path = "kube_client::api::Api::patch_resize", reason = "kubeview is read-only; do not resize Kubernetes resources." },
+    { path = "kube_client::api::Api::patch_scale", reason = "kubeview is read-only; do not scale Kubernetes resources." },
+    { path = "kube_client::api::Api::patch_status", reason = "kubeview is read-only; do not patch Kubernetes status." },
+    { path = "kube_client::api::Api::patch_subresource", reason = "kubeview is read-only; do not patch Kubernetes subresources." },
+    { path = "kube_client::api::Api::portforward", reason = "kubeview is read-only; do not port-forward Kubernetes pods.", allow-invalid = true },
+    { path = "kube_client::api::Api::replace", reason = "kubeview is read-only; do not replace Kubernetes resources." },
+    { path = "kube_client::api::Api::replace_ephemeral_containers", reason = "kubeview is read-only; do not replace ephemeral containers." },
+    { path = "kube_client::api::Api::replace_resize", reason = "kubeview is read-only; do not resize Kubernetes resources." },
+    { path = "kube_client::api::Api::replace_scale", reason = "kubeview is read-only; do not scale Kubernetes resources." },
+    { path = "kube_client::api::Api::replace_status", reason = "kubeview is read-only; do not replace Kubernetes status." },
+    { path = "kube_client::api::Api::replace_subresource", reason = "kubeview is read-only; do not replace Kubernetes subresources." },
+]
+
+disallowed-types = [
+    { path = "kube_core::params::DeleteParams", reason = "kubeview is read-only; delete parameters should not be needed." },
+    { path = "kube_core::params::PatchParams", reason = "kubeview is read-only; patch parameters should not be needed." },
+    { path = "kube_core::params::PostParams", reason = "kubeview is read-only; post parameters should not be needed." },
+    { path = "kube_core::subresource::AttachParams", reason = "kubeview is read-only; attach/exec parameters should not be needed.", allow-invalid = true },
+    { path = "kube_core::subresource::EvictParams", reason = "kubeview is read-only; eviction parameters should not be needed." },
+]

@@ -21,6 +21,13 @@ repos:
       - id: cargo-machete
   - repo: local
     hooks:
+      - id: kubernetes-readonly-text
+        name: kubernetes read-only text guard
+        description: Reject mutating kubectl commands in production text files.
+        entry: python scripts/check_kubernetes_readonly_text.py
+        language: python
+        files: ^(\.github/|README\.md$|Dockerfile$|scripts/|src/.*\.rs$)
+        pass_filenames: false
       - id: taplo
         name: taplo format
         description: Format Cargo.toml files with taplo.
