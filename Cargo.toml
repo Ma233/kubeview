@@ -3,6 +3,9 @@ name = "kubeview"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "Read-only Kubernetes MCP server for inspecting clusters"
+repository = "https://github.com/ma233/kubeview"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.100"
