@@ -63,7 +63,7 @@ kubeview exposes read-only tools:
 - `list_jobs`
 - `list_cronjobs`
 
-The observability tools remain read-only. `get_rollout_status` and `wait_rollout` inspect Deployment, StatefulSet, and DaemonSet status. `trace_service` follows a Service to EndpointSlices and selected Pods. `list_jobs` and `list_cronjobs` summarize batch workload state.
+The observability tools remain read-only. `get_rollout_status` and `wait_rollout` inspect Deployment, StatefulSet, and DaemonSet status. `trace_service` follows a Service to EndpointSlices and selected Pods. `list_jobs` and `list_cronjobs` summarize batch workload state. Event, Job, and CronJob list tools accept an optional `limit`; when omitted, kubeview requests up to 200 items and rejects values above 1000.
 
 ## Docker
 

@@ -1,21 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
 use async_trait::async_trait;
-use k8s_openapi::api::apps::v1::DaemonSet;
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::batch::v1::CronJob;
-use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::Event;
 use k8s_openapi::api::core::v1::Namespace;
 use k8s_openapi::api::core::v1::Pod;
-use k8s_openapi::api::core::v1::Service;
-use k8s_openapi::api::discovery::v1::EndpointSlice;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::jiff::Timestamp;
 use kube::Api;
 use kube::Client;
@@ -32,20 +20,14 @@ use kube::discovery::Scope;
 use kube::discovery::{self};
 
 use crate::error::KubeviewError;
-use crate::tools::ConditionSummary;
+use crate::observability;
 use crate::tools::ContextsResponse;
-use crate::tools::CronJobSummary;
 use crate::tools::CronJobsResponse;
 use crate::tools::CurrentContextResponse;
-use crate::tools::EndpointSliceSummary;
-use crate::tools::EndpointSummary;
-use crate::tools::EndpointTotals;
-use crate::tools::EventSummary;
 use crate::tools::EventsResponse;
 use crate::tools::GetPodInput;
 use crate::tools::GetResourceInput;
 use crate::tools::GetRolloutStatusInput;
-use crate::tools::JobSummary;
 use crate::tools::JobsResponse;
 use crate::tools::KubernetesReader;
 use crate::tools::ListCronJobsInput;
@@ -60,10 +42,7 @@ use crate::tools::PodLogsResponse;
 use crate::tools::PodSummary;
 use crate::tools::PodsResponse;
 use crate::tools::ResourcesResponse;
-use crate::tools::RolloutObservation;
 use crate::tools::RolloutStatusResponse;
-use crate::tools::ServicePortSummary;
-use crate::tools::ServiceTraceSummary;
 use crate::tools::TraceServiceInput;
 use crate::tools::TraceServiceResponse;
 use crate::tools::WaitRolloutInput;
@@ -71,10 +50,6 @@ use crate::tools::WaitRolloutResponse;
 
 const DEFAULT_LOG_TAIL_LINES: u32 = 200;
 const MAX_LOG_TAIL_LINES: u32 = 5_000;
-const DEFAULT_ROLLOUT_TIMEOUT_SECONDS: u64 = 300;
-const DEFAULT_ROLLOUT_INTERVAL_SECONDS: u64 = 5;
-const MIN_ROLLOUT_INTERVAL_SECONDS: u64 = 1;
-const MAX_ROLLOUT_TIMEOUT_SECONDS: u64 = 3_600;
 const LAST_APPLIED_CONFIGURATION_ANNOTATION: &str =
     "kubectl.kubernetes.io/last-applied-configuration";
 
@@ -97,8 +72,11 @@ pub struct KubeClientReader {
 impl KubeClientReader {
     pub async fn new(config: KubernetesConfig) -> Result<Self, KubeviewError> {
         let kubeconfig = match &config.kubeconfig {
-            Some(path) => Kubeconfig::read_from(path)?,
-            None => Kubeconfig::read()?,
+            Some(path) => Kubeconfig::read_from(path).map_err(|error| {
+                KubeviewError::Config(format!("read kubeconfig '{}': {error}", path.display()))
+            })?,
+            None => Kubeconfig::read()
+                .map_err(|error| KubeviewError::Config(format!("read kubeconfig: {error}")))?,
         };
         let selected_context = config
             .context
@@ -110,13 +88,20 @@ impl KubeClientReader {
             cluster: None,
             user: None,
         };
-        let mut kube_config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options).await?;
+        let mut kube_config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options)
+            .await
+            .map_err(|error| {
+                KubeviewError::Config(format!(
+                    "build Kubernetes config for context '{selected_context}': {error}"
+                ))
+            })?;
         let namespace_scope = config.namespace.clone();
         if let Some(namespace) = namespace_scope.clone() {
             kube_config.default_namespace = namespace;
         }
         let namespace = kube_config.default_namespace.clone();
-        let client = Client::try_from(kube_config)?;
+        let client = Client::try_from(kube_config)
+            .map_err(|error| KubeviewError::Config(format!("create Kubernetes client: {error}")))?;
 
         Ok(Self {
             client,
@@ -163,7 +148,12 @@ impl KubeClientReader {
         let gvk = GroupVersionKind::gvk(group, version, kind);
         discovery::pinned_kind(&self.client, &gvk)
             .await
-            .map_err(Into::into)
+            .map_err(|error| {
+                KubeviewError::kubernetes_context(
+                    format!("discover api resource {api_version}/{kind}"),
+                    error,
+                )
+            })
     }
 }
 
@@ -209,7 +199,10 @@ impl KubernetesReader for KubeClientReader {
         }
 
         let namespaces: Api<Namespace> = Api::all(self.client.clone());
-        let list = namespaces.list(&ListParams::default()).await?;
+        let list = namespaces
+            .list(&ListParams::default())
+            .await
+            .map_err(|error| KubeviewError::kubernetes_context("list namespaces", error))?;
         Ok(NamespacesResponse {
             namespaces: list.items.into_iter().map(namespace_summary).collect(),
         })
@@ -228,7 +221,10 @@ impl KubernetesReader for KubeClientReader {
             Some(namespace) => Api::namespaced(self.client.clone(), namespace),
             None => Api::all(self.client.clone()),
         };
-        let list = pods.list(&params).await?;
+        let list = pods
+            .list(&params)
+            .await
+            .map_err(|error| KubeviewError::kubernetes_context("list pods", error))?;
         Ok(PodsResponse {
             namespace,
             pods: list.items.into_iter().map(pod_summary).collect(),
@@ -236,14 +232,17 @@ impl KubernetesReader for KubeClientReader {
     }
 
     async fn get_pod(&self, input: GetPodInput) -> Result<serde_json::Value, KubeviewError> {
-        let namespace = self.namespace_or_default(input.namespace)?;
+        let namespace = self.namespace_or_default(input.namespace.clone())?;
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &namespace);
-        let pod = pods.get(&input.name).await?;
+        let pod = pods
+            .get(&input.name)
+            .await
+            .map_err(|error| KubeviewError::kubernetes_context("get pod", error))?;
         serde_json::to_value(pod).map_err(|error| KubeviewError::Kubernetes(error.to_string()))
     }
 
     async fn pod_logs(&self, input: PodLogsInput) -> Result<PodLogsResponse, KubeviewError> {
-        let namespace = self.namespace_or_default(input.namespace)?;
+        let namespace = self.namespace_or_default(input.namespace.clone())?;
         let tail_lines = resolve_log_tail_lines(input.tail_lines)?;
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &namespace);
         let params = LogParams {
@@ -251,7 +250,10 @@ impl KubernetesReader for KubeClientReader {
             tail_lines: Some(i64::from(tail_lines)),
             ..LogParams::default()
         };
-        let logs = pods.logs(&input.pod, &params).await?;
+        let logs = pods
+            .logs(&input.pod, &params)
+            .await
+            .map_err(|error| KubeviewError::kubernetes_context("read pod logs", error))?;
 
         Ok(PodLogsResponse {
             pod: input.pod,
@@ -286,7 +288,10 @@ impl KubernetesReader for KubeClientReader {
             Some(namespace) => Api::namespaced_with(self.client.clone(), namespace, &api_resource),
             None => Api::all_with(self.client.clone(), &api_resource),
         };
-        let list = api.list(&params).await?;
+        let list = api
+            .list(&params)
+            .await
+            .map_err(|error| KubeviewError::kubernetes_context("list resources", error))?;
         let items = list
             .items
             .into_iter()
@@ -323,7 +328,10 @@ impl KubernetesReader for KubeClientReader {
             Some(namespace) => Api::namespaced_with(self.client.clone(), namespace, &api_resource),
             None => Api::all_with(self.client.clone(), &api_resource),
         };
-        let resource = api.get(&input.name).await?;
+        let resource = api
+            .get(&input.name)
+            .await
+            .map_err(|error| KubeviewError::kubernetes_context("get resource", error))?;
         serialize_dynamic_resource(resource, &api_resource)
             .map_err(|error| KubeviewError::Kubernetes(error.to_string()))
     }
@@ -336,156 +344,43 @@ impl KubernetesReader for KubeClientReader {
         } else {
             Some(self.namespace_or_default(input.namespace.clone())?)
         };
-        let events: Api<Event> = match &namespace {
-            Some(namespace) => Api::namespaced(self.client.clone(), namespace),
-            None => Api::all(self.client.clone()),
-        };
-        let list = events.list(&ListParams::default()).await?;
-        let events = list
-            .items
-            .into_iter()
-            .filter(|event| event_matches_filter(event, &input))
-            .map(event_summary)
-            .collect();
-
-        Ok(EventsResponse { namespace, events })
+        observability::list_events(&self.client, namespace, input).await
     }
 
     async fn get_rollout_status(
         &self,
         input: GetRolloutStatusInput,
     ) -> Result<RolloutStatusResponse, KubeviewError> {
-        let namespace = self.namespace_or_default(input.namespace)?;
-        rollout_status_for(&self.client, &namespace, &input.kind, &input.name).await
+        let namespace = self.namespace_or_default(input.namespace.clone())?;
+        observability::get_rollout_status(&self.client, namespace, input).await
     }
 
     async fn wait_rollout(
         &self,
         input: WaitRolloutInput,
     ) -> Result<WaitRolloutResponse, KubeviewError> {
-        let timeout = resolve_rollout_timeout(input.timeout_seconds)?;
-        let interval = resolve_rollout_interval(input.interval_seconds)?;
-        let namespace = self.namespace_or_default(input.namespace)?;
-        let started_at = Instant::now();
-        let mut observations = Vec::new();
-
-        loop {
-            let status =
-                rollout_status_for(&self.client, &namespace, &input.kind, &input.name).await?;
-            let elapsed_seconds = started_at.elapsed().as_secs();
-            observations.push(RolloutObservation {
-                elapsed_seconds,
-                complete: status.complete,
-                message: status.message.clone(),
-                updated_replicas: status.updated_replicas,
-                ready_replicas: status.ready_replicas,
-                available_replicas: status.available_replicas,
-            });
-
-            if status.complete {
-                return Ok(WaitRolloutResponse {
-                    status,
-                    completed: true,
-                    timed_out: false,
-                    elapsed_seconds,
-                    observations,
-                });
-            }
-
-            if elapsed_seconds >= timeout {
-                return Ok(WaitRolloutResponse {
-                    status,
-                    completed: false,
-                    timed_out: true,
-                    elapsed_seconds,
-                    observations,
-                });
-            }
-
-            tokio::time::sleep(Duration::from_secs(interval)).await;
-        }
+        let namespace = self.namespace_or_default(input.namespace.clone())?;
+        observability::wait_rollout(&self.client, namespace, input).await
     }
 
     async fn trace_service(
         &self,
         input: TraceServiceInput,
     ) -> Result<TraceServiceResponse, KubeviewError> {
-        let namespace = self.namespace_or_default(input.namespace)?;
-        let services: Api<Service> = Api::namespaced(self.client.clone(), &namespace);
-        let service = services.get(&input.name).await?;
-        let service_summary = service_trace_summary(&service);
-        let mut warnings = Vec::new();
-
-        let slices: Api<EndpointSlice> = Api::namespaced(self.client.clone(), &namespace);
-        let slice_params =
-            ListParams::default().labels(&format!("kubernetes.io/service-name={}", input.name));
-        let endpoint_slices = slices
-            .list(&slice_params)
-            .await?
-            .items
-            .into_iter()
-            .map(endpoint_slice_summary)
-            .collect::<Vec<_>>();
-        let endpoints = endpoint_totals(&endpoint_slices);
-        if endpoints.total == 0 {
-            warnings.push("service has no EndpointSlice endpoints".to_string());
-        } else if endpoints.ready == 0 {
-            warnings.push("service has no ready endpoints".to_string());
-        }
-
-        let selected_pods = match service
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.selector.as_ref())
-        {
-            Some(selector) if !selector.is_empty() => {
-                let pods: Api<Pod> = Api::namespaced(self.client.clone(), &namespace);
-                let params = ListParams::default().labels(&map_label_selector(selector));
-                pods.list(&params)
-                    .await?
-                    .items
-                    .into_iter()
-                    .map(pod_summary)
-                    .collect()
-            }
-            _ => {
-                warnings
-                    .push("service has no selector; endpoints may be managed manually".to_string());
-                Vec::new()
-            }
-        };
-        if service_summary.selector.is_some() && selected_pods.is_empty() {
-            warnings.push("service selector does not match any pods".to_string());
-        }
-
-        Ok(TraceServiceResponse {
-            namespace,
-            service: service_summary,
-            endpoint_slices,
-            endpoints,
-            selected_pods,
-            warnings,
-        })
+        let namespace = self.namespace_or_default(input.namespace.clone())?;
+        observability::trace_service(&self.client, namespace, input).await
     }
 
     async fn list_jobs(&self, input: ListJobsInput) -> Result<JobsResponse, KubeviewError> {
         ensure_namespace_filter_not_conflicting(input.all_namespaces, input.namespace.as_deref())?;
         self.ensure_all_namespaces_allowed(input.all_namespaces)?;
-        let params = Self::list_params(input.label_selector, input.field_selector);
+        let params = Self::list_params(input.label_selector.clone(), input.field_selector.clone());
         let namespace = if input.all_namespaces {
             None
         } else {
-            Some(self.namespace_or_default(input.namespace)?)
+            Some(self.namespace_or_default(input.namespace.clone())?)
         };
-        let jobs: Api<Job> = match &namespace {
-            Some(namespace) => Api::namespaced(self.client.clone(), namespace),
-            None => Api::all(self.client.clone()),
-        };
-        let list = jobs.list(&params).await?;
-        Ok(JobsResponse {
-            namespace,
-            jobs: list.items.into_iter().map(job_summary).collect(),
-        })
+        observability::list_jobs(&self.client, namespace, input, params).await
     }
 
     async fn list_cronjobs(
@@ -494,454 +389,14 @@ impl KubernetesReader for KubeClientReader {
     ) -> Result<CronJobsResponse, KubeviewError> {
         ensure_namespace_filter_not_conflicting(input.all_namespaces, input.namespace.as_deref())?;
         self.ensure_all_namespaces_allowed(input.all_namespaces)?;
-        let params = Self::list_params(input.label_selector, input.field_selector);
+        let params = Self::list_params(input.label_selector.clone(), input.field_selector.clone());
         let namespace = if input.all_namespaces {
             None
         } else {
-            Some(self.namespace_or_default(input.namespace)?)
+            Some(self.namespace_or_default(input.namespace.clone())?)
         };
-        let cronjobs: Api<CronJob> = match &namespace {
-            Some(namespace) => Api::namespaced(self.client.clone(), namespace),
-            None => Api::all(self.client.clone()),
-        };
-        let list = cronjobs.list(&params).await?;
-        Ok(CronJobsResponse {
-            namespace,
-            cronjobs: list.items.into_iter().map(cronjob_summary).collect(),
-        })
+        observability::list_cronjobs(&self.client, namespace, input, params).await
     }
-}
-
-async fn rollout_status_for(
-    client: &Client,
-    namespace: &str,
-    kind: &str,
-    name: &str,
-) -> Result<RolloutStatusResponse, KubeviewError> {
-    match normalized_workload_kind(kind).as_str() {
-        "deployment" => {
-            let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-            let deployment = api.get(name).await?;
-            Ok(deployment_rollout_status(deployment, namespace))
-        }
-        "statefulset" => {
-            let api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-            let stateful_set = api.get(name).await?;
-            Ok(stateful_set_rollout_status(stateful_set, namespace))
-        }
-        "daemonset" => {
-            let api: Api<DaemonSet> = Api::namespaced(client.clone(), namespace);
-            let daemon_set = api.get(name).await?;
-            Ok(daemon_set_rollout_status(daemon_set, namespace))
-        }
-        _ => Err(KubeviewError::InvalidInput(format!(
-            "unsupported rollout kind '{kind}', expected Deployment, StatefulSet, or DaemonSet"
-        ))),
-    }
-}
-
-fn deployment_rollout_status(deployment: Deployment, namespace: &str) -> RolloutStatusResponse {
-    let name = deployment.name_any();
-    let desired = deployment
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.replicas)
-        .unwrap_or(1);
-    let generation = deployment.metadata.generation;
-    let status = deployment.status.unwrap_or_default();
-    let observed_generation = status.observed_generation;
-    let updated = status.updated_replicas.unwrap_or_default();
-    let ready = status.ready_replicas.unwrap_or_default();
-    let available = status.available_replicas.unwrap_or_default();
-    let unavailable = status.unavailable_replicas.unwrap_or_default();
-    let observed = generation_observed(observed_generation, generation);
-    let complete = observed && updated >= desired && available >= desired && unavailable == 0;
-    let message = if complete {
-        format!("deployment '{name}' rollout complete")
-    } else if !observed {
-        format!(
-            "deployment '{}' controller has not observed latest generation",
-            name
-        )
-    } else {
-        format!(
-            "deployment '{name}' rollout in progress: {available}/{desired} available, {updated}/{desired} updated"
-        )
-    };
-
-    RolloutStatusResponse {
-        kind: "Deployment".to_string(),
-        name,
-        namespace: namespace.to_string(),
-        complete,
-        message,
-        desired_replicas: desired,
-        updated_replicas: updated,
-        ready_replicas: ready,
-        available_replicas: available,
-        unavailable_replicas: unavailable,
-        observed_generation,
-        generation,
-        conditions: status
-            .conditions
-            .unwrap_or_default()
-            .into_iter()
-            .map(|condition| ConditionSummary {
-                type_: condition.type_,
-                status: condition.status,
-                reason: condition.reason,
-                message: condition.message,
-            })
-            .collect(),
-    }
-}
-
-fn stateful_set_rollout_status(
-    stateful_set: StatefulSet,
-    namespace: &str,
-) -> RolloutStatusResponse {
-    let name = stateful_set.name_any();
-    let desired = stateful_set
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.replicas)
-        .unwrap_or(1);
-    let generation = stateful_set.metadata.generation;
-    let status = stateful_set.status.unwrap_or_default();
-    let observed_generation = status.observed_generation;
-    let updated = status.updated_replicas.unwrap_or_default();
-    let ready = status.ready_replicas.unwrap_or_default();
-    let available = status.available_replicas.unwrap_or_default();
-    let unavailable = desired.saturating_sub(ready);
-    let observed = generation_observed(observed_generation, generation);
-    let complete = observed && updated >= desired && ready >= desired;
-    let message = if complete {
-        format!("statefulset '{name}' rollout complete")
-    } else if !observed {
-        format!(
-            "statefulset '{}' controller has not observed latest generation",
-            name
-        )
-    } else {
-        format!(
-            "statefulset '{name}' rollout in progress: {ready}/{desired} ready, {updated}/{desired} updated"
-        )
-    };
-
-    RolloutStatusResponse {
-        kind: "StatefulSet".to_string(),
-        name,
-        namespace: namespace.to_string(),
-        complete,
-        message,
-        desired_replicas: desired,
-        updated_replicas: updated,
-        ready_replicas: ready,
-        available_replicas: available,
-        unavailable_replicas: unavailable,
-        observed_generation,
-        generation,
-        conditions: status
-            .conditions
-            .unwrap_or_default()
-            .into_iter()
-            .map(|condition| ConditionSummary {
-                type_: condition.type_,
-                status: condition.status,
-                reason: None,
-                message: condition.message,
-            })
-            .collect(),
-    }
-}
-
-fn daemon_set_rollout_status(daemon_set: DaemonSet, namespace: &str) -> RolloutStatusResponse {
-    let name = daemon_set.name_any();
-    let generation = daemon_set.metadata.generation;
-    let status = daemon_set.status.unwrap_or_default();
-    let observed_generation = status.observed_generation;
-    let desired = status.desired_number_scheduled;
-    let updated = status.updated_number_scheduled.unwrap_or_default();
-    let ready = status.number_ready;
-    let available = status.number_available.unwrap_or(ready);
-    let unavailable = status
-        .number_unavailable
-        .unwrap_or_else(|| desired.saturating_sub(ready));
-    let observed = generation_observed(observed_generation, generation);
-    let complete = observed && updated >= desired && ready >= desired && unavailable == 0;
-    let message = if complete {
-        format!("daemonset '{name}' rollout complete")
-    } else if !observed {
-        format!(
-            "daemonset '{}' controller has not observed latest generation",
-            name
-        )
-    } else {
-        format!(
-            "daemonset '{name}' rollout in progress: {ready}/{desired} ready, {updated}/{desired} updated"
-        )
-    };
-
-    RolloutStatusResponse {
-        kind: "DaemonSet".to_string(),
-        name,
-        namespace: namespace.to_string(),
-        complete,
-        message,
-        desired_replicas: desired,
-        updated_replicas: updated,
-        ready_replicas: ready,
-        available_replicas: available,
-        unavailable_replicas: unavailable,
-        observed_generation,
-        generation,
-        conditions: status
-            .conditions
-            .unwrap_or_default()
-            .into_iter()
-            .map(|condition| ConditionSummary {
-                type_: condition.type_,
-                status: condition.status,
-                reason: None,
-                message: condition.message,
-            })
-            .collect(),
-    }
-}
-
-fn normalized_workload_kind(kind: &str) -> String {
-    kind.to_ascii_lowercase().replace('-', "")
-}
-
-fn generation_observed(observed_generation: Option<i64>, generation: Option<i64>) -> bool {
-    match (observed_generation, generation) {
-        (Some(observed), Some(generation)) => observed >= generation,
-        _ => true,
-    }
-}
-
-fn event_matches_filter(event: &Event, input: &ListEventsInput) -> bool {
-    if let Some(expected) = &input.involved_kind
-        && event.involved_object.kind.as_deref() != Some(expected.as_str())
-    {
-        return false;
-    }
-    if let Some(expected) = &input.involved_name
-        && event.involved_object.name.as_deref() != Some(expected.as_str())
-    {
-        return false;
-    }
-    if let Some(expected) = &input.type_
-        && event.type_.as_deref() != Some(expected.as_str())
-    {
-        return false;
-    }
-    true
-}
-
-fn event_summary(event: Event) -> EventSummary {
-    EventSummary {
-        name: event.name_any(),
-        namespace: event.namespace(),
-        type_: event.type_,
-        reason: event.reason,
-        message: event.message,
-        count: event.count,
-        first_timestamp: time_to_string(event.first_timestamp),
-        last_timestamp: time_to_string(event.last_timestamp),
-        involved_kind: event.involved_object.kind,
-        involved_name: event.involved_object.name,
-        reporting_component: event.reporting_component.or_else(|| {
-            event
-                .source
-                .and_then(|source| source.component.or(source.host))
-        }),
-    }
-}
-
-fn service_trace_summary(service: &Service) -> ServiceTraceSummary {
-    let spec = service.spec.as_ref();
-    ServiceTraceSummary {
-        name: service.name_any(),
-        type_: spec.and_then(|spec| spec.type_.clone()),
-        cluster_ip: spec.and_then(|spec| spec.cluster_ip.clone()),
-        selector: spec.and_then(|spec| spec.selector.clone()),
-        ports: spec
-            .and_then(|spec| spec.ports.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|port| ServicePortSummary {
-                name: port.name,
-                port: port.port,
-                target_port: port.target_port.map(int_or_string),
-                protocol: port.protocol,
-            })
-            .collect(),
-    }
-}
-
-fn endpoint_slice_summary(slice: EndpointSlice) -> EndpointSliceSummary {
-    EndpointSliceSummary {
-        name: slice.name_any(),
-        address_type: slice.address_type,
-        endpoints: slice.endpoints.into_iter().map(endpoint_summary).collect(),
-    }
-}
-
-fn endpoint_summary(endpoint: k8s_openapi::api::discovery::v1::Endpoint) -> EndpointSummary {
-    let ready = endpoint
-        .conditions
-        .as_ref()
-        .and_then(|conditions| conditions.ready)
-        .unwrap_or(true);
-    let serving = endpoint
-        .conditions
-        .as_ref()
-        .and_then(|conditions| conditions.serving)
-        .unwrap_or(true);
-    let terminating = endpoint
-        .conditions
-        .as_ref()
-        .and_then(|conditions| conditions.terminating)
-        .unwrap_or(false);
-
-    EndpointSummary {
-        addresses: endpoint.addresses,
-        ready,
-        serving,
-        terminating,
-        target_kind: endpoint
-            .target_ref
-            .as_ref()
-            .and_then(|target| target.kind.clone()),
-        target_name: endpoint
-            .target_ref
-            .as_ref()
-            .and_then(|target| target.name.clone()),
-        node_name: endpoint.node_name,
-    }
-}
-
-fn endpoint_totals(slices: &[EndpointSliceSummary]) -> EndpointTotals {
-    let mut totals = EndpointTotals {
-        total: 0,
-        ready: 0,
-        serving: 0,
-        terminating: 0,
-    };
-    for endpoint in slices.iter().flat_map(|slice| slice.endpoints.iter()) {
-        totals.total += 1;
-        totals.ready += usize::from(endpoint.ready);
-        totals.serving += usize::from(endpoint.serving);
-        totals.terminating += usize::from(endpoint.terminating);
-    }
-    totals
-}
-
-fn job_summary(job: Job) -> JobSummary {
-    let spec = job.spec.as_ref();
-    let status = job.status.as_ref();
-    JobSummary {
-        name: job.name_any(),
-        namespace: job.namespace(),
-        active: status.and_then(|status| status.active).unwrap_or_default(),
-        ready: status.and_then(|status| status.ready).unwrap_or_default(),
-        succeeded: status
-            .and_then(|status| status.succeeded)
-            .unwrap_or_default(),
-        failed: status.and_then(|status| status.failed).unwrap_or_default(),
-        terminating: status
-            .and_then(|status| status.terminating)
-            .unwrap_or_default(),
-        completions: spec.and_then(|spec| spec.completions),
-        parallelism: spec.and_then(|spec| spec.parallelism),
-        suspend: spec.and_then(|spec| spec.suspend),
-        completion_time: status.and_then(|status| time_to_string(status.completion_time.clone())),
-        start_time: status.and_then(|status| time_to_string(status.start_time.clone())),
-        conditions: status
-            .and_then(|status| status.conditions.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|condition| ConditionSummary {
-                type_: condition.type_,
-                status: condition.status,
-                reason: condition.reason,
-                message: condition.message,
-            })
-            .collect(),
-        owner_names: job
-            .metadata
-            .owner_references
-            .unwrap_or_default()
-            .into_iter()
-            .map(|owner| owner.name)
-            .collect(),
-    }
-}
-
-fn cronjob_summary(cronjob: CronJob) -> CronJobSummary {
-    let spec = cronjob.spec.as_ref();
-    let status = cronjob.status.as_ref();
-    let active_jobs = status
-        .and_then(|status| status.active.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|reference| reference.name)
-        .collect::<Vec<_>>();
-
-    CronJobSummary {
-        name: cronjob.name_any(),
-        namespace: cronjob.namespace(),
-        schedule: spec.map_or_else(String::new, |spec| spec.schedule.clone()),
-        suspend: spec.and_then(|spec| spec.suspend),
-        active: active_jobs.len(),
-        active_jobs,
-        last_schedule_time: status
-            .and_then(|status| time_to_string(status.last_schedule_time.clone())),
-        last_successful_time: status
-            .and_then(|status| time_to_string(status.last_successful_time.clone())),
-        concurrency_policy: spec.and_then(|spec| spec.concurrency_policy.clone()),
-        time_zone: spec.and_then(|spec| spec.time_zone.clone()),
-    }
-}
-
-fn map_label_selector(selector: &std::collections::BTreeMap<String, String>) -> String {
-    selector
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn int_or_string(value: IntOrString) -> String {
-    match value {
-        IntOrString::Int(value) => value.to_string(),
-        IntOrString::String(value) => value,
-    }
-}
-
-fn time_to_string(time: Option<Time>) -> Option<String> {
-    time.map(|time| time.0.to_string())
-}
-
-fn resolve_rollout_timeout(timeout_seconds: Option<u64>) -> Result<u64, KubeviewError> {
-    let timeout = timeout_seconds.unwrap_or(DEFAULT_ROLLOUT_TIMEOUT_SECONDS);
-    if timeout > MAX_ROLLOUT_TIMEOUT_SECONDS {
-        return Err(KubeviewError::InvalidInput(format!(
-            "timeout_seconds must be less than or equal to {MAX_ROLLOUT_TIMEOUT_SECONDS}"
-        )));
-    }
-    Ok(timeout)
-}
-
-fn resolve_rollout_interval(interval_seconds: Option<u64>) -> Result<u64, KubeviewError> {
-    let interval = interval_seconds.unwrap_or(DEFAULT_ROLLOUT_INTERVAL_SECONDS);
-    if interval < MIN_ROLLOUT_INTERVAL_SECONDS {
-        return Err(KubeviewError::InvalidInput(format!(
-            "interval_seconds must be greater than or equal to {MIN_ROLLOUT_INTERVAL_SECONDS}"
-        )));
-    }
-    Ok(interval)
 }
 
 fn namespace_summary(namespace: Namespace) -> NamespaceSummary {
@@ -1106,7 +561,7 @@ fn format_age(created_at: Timestamp, now: Timestamp) -> String {
     }
 }
 
-fn pod_summary(pod: Pod) -> PodSummary {
+pub(crate) fn pod_summary(pod: Pod) -> PodSummary {
     let status = pod.status.clone();
     let container_statuses = status
         .as_ref()
@@ -1143,208 +598,4 @@ fn pod_summary(pod: Pod) -> PodSummary {
 }
 
 #[cfg(test)]
-mod tests {
-    use kube::core::ApiResource;
-
-    use super::*;
-
-    fn capabilities(scope: Scope) -> ApiCapabilities {
-        ApiCapabilities {
-            scope,
-            subresources: vec![],
-            operations: vec![],
-        }
-    }
-
-    #[test]
-    fn split_core_api_version() {
-        assert_eq!(split_api_version("v1").unwrap(), ("", "v1"));
-    }
-
-    #[test]
-    fn split_group_api_version() {
-        assert_eq!(split_api_version("apps/v1").unwrap(), ("apps", "v1"));
-    }
-
-    #[test]
-    fn scoped_namespace_rejects_other_namespace() {
-        let scope = Some("prod".to_string());
-        let error = resolve_namespace(&scope, "default", Some("dev".to_string())).unwrap_err();
-
-        assert!(error.to_string().contains("outside configured scope"));
-    }
-
-    #[test]
-    fn scoped_namespace_uses_scope_when_request_omits_namespace() {
-        let scope = Some("prod".to_string());
-
-        assert_eq!(resolve_namespace(&scope, "default", None).unwrap(), "prod");
-    }
-
-    #[test]
-    fn scoped_namespace_rejects_all_namespaces() {
-        let scope = Some("prod".to_string());
-        let error = ensure_all_namespaces_allowed(&scope, true).unwrap_err();
-
-        assert!(error.to_string().contains("all_namespaces is not allowed"));
-    }
-
-    #[test]
-    fn namespace_filter_rejects_all_namespaces_with_namespace() {
-        let error = ensure_namespace_filter_not_conflicting(true, Some("prod")).unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("cannot be combined with all_namespaces")
-        );
-    }
-
-    #[test]
-    fn namespace_filter_accepts_single_namespace() {
-        let result = ensure_namespace_filter_not_conflicting(false, Some("prod"));
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn namespace_filter_accepts_all_namespaces_without_namespace() {
-        let result = ensure_namespace_filter_not_conflicting(true, None);
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn scoped_namespace_rejects_cluster_scoped_generic_resource() {
-        let scope = Some("prod".to_string());
-        let error = ensure_cluster_resource_allowed(&scope, &capabilities(Scope::Cluster), "Node")
-            .unwrap_err();
-
-        assert!(error.to_string().contains("cluster-scoped resource"));
-    }
-
-    #[test]
-    fn cluster_scoped_resource_rejects_namespace() {
-        let error = ensure_cluster_resource_namespace_absent(
-            &capabilities(Scope::Cluster),
-            "Node",
-            Some("prod"),
-        )
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("not valid for cluster-scoped resource")
-        );
-    }
-
-    #[test]
-    fn namespaced_resource_accepts_namespace() {
-        let result = ensure_cluster_resource_namespace_absent(
-            &capabilities(Scope::Namespaced),
-            "Deployment",
-            Some("prod"),
-        );
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn log_tail_lines_default_when_omitted() {
-        assert_eq!(
-            resolve_log_tail_lines(None).unwrap(),
-            DEFAULT_LOG_TAIL_LINES
-        );
-    }
-
-    #[test]
-    fn log_tail_lines_rejects_values_above_limit() {
-        let error = resolve_log_tail_lines(Some(MAX_LOG_TAIL_LINES + 1)).unwrap_err();
-
-        assert!(error.to_string().contains("tail_lines must be"));
-    }
-
-    #[test]
-    fn format_age_uses_largest_whole_time_unit() {
-        let created_at = Timestamp::from_second(1_000).unwrap();
-
-        assert_eq!(
-            format_age(created_at, Timestamp::from_second(1_045).unwrap()),
-            "45s"
-        );
-        assert_eq!(
-            format_age(created_at, Timestamp::from_second(1_180).unwrap()),
-            "3m"
-        );
-        assert_eq!(
-            format_age(created_at, Timestamp::from_second(8_200).unwrap()),
-            "2h"
-        );
-        assert_eq!(
-            format_age(created_at, Timestamp::from_second(173_800).unwrap()),
-            "2d"
-        );
-    }
-
-    #[test]
-    fn format_age_clamps_future_timestamps_to_zero() {
-        assert_eq!(
-            format_age(
-                Timestamp::from_second(2_000).unwrap(),
-                Timestamp::from_second(1_000).unwrap()
-            ),
-            "0s"
-        );
-    }
-
-    #[test]
-    fn scoped_namespaces_response_uses_scope_without_status() {
-        let response = scoped_namespaces_response("prod");
-
-        assert_eq!(response.namespaces.len(), 1);
-        assert_eq!(response.namespaces[0].name, "prod");
-        assert_eq!(response.namespaces[0].status, None);
-    }
-
-    #[test]
-    fn secret_redaction_removes_secret_payload_fields() {
-        let api_resource = ApiResource {
-            group: String::new(),
-            version: "v1".to_string(),
-            api_version: "v1".to_string(),
-            kind: "Secret".to_string(),
-            plural: "secrets".to_string(),
-        };
-        let mut value = serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "data": {"token": "c2VjcmV0"},
-            "stringData": {"token": "secret"},
-            "metadata": {
-                "name": "example",
-                "annotations": {
-                    "kubectl.kubernetes.io/last-applied-configuration": "{\"data\":{\"token\":\"c2VjcmV0\"}}",
-                    "example.com/owner": "platform"
-                }
-            }
-        });
-
-        if is_secret_resource(&api_resource) {
-            redact_secret_value(&mut value);
-        }
-
-        assert!(value.get("data").is_none());
-        assert!(value.get("stringData").is_none());
-        assert!(
-            value["metadata"]["annotations"]
-                .get("kubectl.kubernetes.io/last-applied-configuration")
-                .is_none()
-        );
-        assert_eq!(
-            value["metadata"]["annotations"]["example.com/owner"],
-            "platform"
-        );
-        assert_eq!(value["redacted"], "secret data omitted");
-    }
-}
+mod tests;

@@ -12,6 +12,12 @@ pub enum KubeviewError {
     Config(String),
 }
 
+impl KubeviewError {
+    pub(crate) fn kubernetes_context(context: impl AsRef<str>, error: kube::Error) -> Self {
+        Self::Kubernetes(format!("{}: {error}", context.as_ref()))
+    }
+}
+
 impl From<kube::Error> for KubeviewError {
     fn from(error: kube::Error) -> Self {
         Self::Kubernetes(error.to_string())
