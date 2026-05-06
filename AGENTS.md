@@ -72,6 +72,19 @@ clusters, not for changing them.
 - Tests should not require a live Kubernetes cluster unless they are clearly marked or documented as
   integration/manual tests.
 
+## Integration Test Organization
+
+- Keep live-cluster and kind-based integration tests isolated from unit tests and production modules.
+- Live-cluster tests must be opt-in by default, for example through an explicit environment variable
+  in CI.
+- Place integration fixtures, cluster helpers, protocol clients, and assertions in focused test-only
+  modules instead of growing one large test file.
+- Organize assertions by behavior or scenario, not by a single broad end-to-end function.
+- Avoid repeated ad hoc JSON path access in test bodies. Prefer small helper methods or test-only
+  response structs for frequently asserted response shapes.
+- Use cleanup guards for temporary Kubernetes resources, and name helpers according to their real
+  responsibility.
+
 ## Local Verification
 
 After Rust code changes, run the relevant checks from the repository root:

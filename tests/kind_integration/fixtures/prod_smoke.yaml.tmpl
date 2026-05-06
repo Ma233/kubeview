@@ -1,0 +1,221 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __NAMESPACE__
+  labels:
+    purpose: kubeview-prod-smoke
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: __NAMESPACE__
+  labels:
+    app: frontend
+    tier: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: frontend
+      tier: web
+  template:
+    metadata:
+      labels:
+        app: frontend
+        tier: web
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 1
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app: frontend
+    tier: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-api
+  namespace: __NAMESPACE__
+  labels:
+    app: broken-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: broken-api
+  template:
+    metadata:
+      labels:
+        app: broken-api
+    spec:
+      containers:
+        - name: api
+          image: nginx:this-tag-should-not-exist-kubeview
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: broken-api
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app: broken-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orphan
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app: does-not-exist
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache
+  namespace: __NAMESPACE__
+spec:
+  clusterIP: None
+  selector:
+    app: cache
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cache
+  namespace: __NAMESPACE__
+spec:
+  serviceName: cache
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      containers:
+        - name: cache
+          image: busybox:1.36
+          command: ["sh", "-c", "nc -lk -p 6379 >/dev/null 2>&1 || sleep 3600"]
+          ports:
+            - containerPort: 6379
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-probe
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    matchLabels:
+      app: node-probe
+  template:
+    metadata:
+      labels:
+        app: node-probe
+    spec:
+      containers:
+        - name: probe
+          image: busybox:1.36
+          command: ["sh", "-c", "echo node probe started; sleep 3600"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: complete-once
+  namespace: __NAMESPACE__
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: complete
+          image: busybox:1.36
+          command: ["sh", "-c", "echo complete job log; exit 0"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fail-once
+  namespace: __NAMESPACE__
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fail
+          image: busybox:1.36
+          command: ["sh", "-c", "echo failed job log; exit 1"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: long-running
+  namespace: __NAMESPACE__
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sleeper
+          image: busybox:1.36
+          command: ["sh", "-c", "echo long job started; sleep 180"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: batch-daily
+  namespace: __NAMESPACE__
+spec:
+  schedule: "17 3 * * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: batch
+              image: busybox:1.36
+              command: ["sh", "-c", "echo scheduled batch"]
