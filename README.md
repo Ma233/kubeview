@@ -56,6 +56,14 @@ kubeview exposes read-only tools:
 - `pod_logs`
 - `list_resources`
 - `get_resource`
+- `list_events`
+- `get_rollout_status`
+- `wait_rollout`
+- `trace_service`
+- `list_jobs`
+- `list_cronjobs`
+
+The observability tools remain read-only. `get_rollout_status` and `wait_rollout` inspect Deployment, StatefulSet, and DaemonSet status. `trace_service` follows a Service to EndpointSlices and selected Pods. `list_jobs` and `list_cronjobs` summarize batch workload state.
 
 ## Docker
 
@@ -89,3 +97,5 @@ pre-commit run --all-files
 ## Security Model
 
 kubeview is intentionally read-only. It never creates, updates, patches, deletes, or executes resources in the cluster. Kubernetes RBAC still applies, so run it with a kubeconfig whose permissions match the access you want MCP clients to have.
+
+For rollout and batch observability, the kubeconfig needs read access to the relevant namespaces for Pods, Events, Services, EndpointSlices, Deployments, StatefulSets, DaemonSets, Jobs, and CronJobs.

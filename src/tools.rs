@@ -32,6 +32,30 @@ pub trait KubernetesReader: Send + Sync + 'static {
         &self,
         input: GetResourceInput,
     ) -> Result<serde_json::Value, KubeviewError>;
+
+    async fn list_events(&self, input: ListEventsInput) -> Result<EventsResponse, KubeviewError>;
+
+    async fn get_rollout_status(
+        &self,
+        input: GetRolloutStatusInput,
+    ) -> Result<RolloutStatusResponse, KubeviewError>;
+
+    async fn wait_rollout(
+        &self,
+        input: WaitRolloutInput,
+    ) -> Result<WaitRolloutResponse, KubeviewError>;
+
+    async fn trace_service(
+        &self,
+        input: TraceServiceInput,
+    ) -> Result<TraceServiceResponse, KubeviewError>;
+
+    async fn list_jobs(&self, input: ListJobsInput) -> Result<JobsResponse, KubeviewError>;
+
+    async fn list_cronjobs(
+        &self,
+        input: ListCronJobsInput,
+    ) -> Result<CronJobsResponse, KubeviewError>;
 }
 
 #[derive(Clone)]
@@ -159,6 +183,115 @@ impl KubeTools {
             .await
             .map(StructuredContent)
     }
+
+    /// List Kubernetes events for rollout and runtime diagnosis.
+    async fn list_events(
+        &self,
+        namespace: Option<String>,
+        all_namespaces: Option<bool>,
+        involved_kind: Option<String>,
+        involved_name: Option<String>,
+        type_: Option<String>,
+    ) -> Result<StructuredContent<EventsResponse>, KubeviewError> {
+        self.reader
+            .list_events(ListEventsInput {
+                namespace,
+                all_namespaces: all_namespaces.unwrap_or(false),
+                involved_kind,
+                involved_name,
+                type_,
+            })
+            .await
+            .map(StructuredContent)
+    }
+
+    /// Get rollout status for a Deployment, StatefulSet, or DaemonSet.
+    async fn get_rollout_status(
+        &self,
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+    ) -> Result<StructuredContent<RolloutStatusResponse>, KubeviewError> {
+        self.reader
+            .get_rollout_status(GetRolloutStatusInput {
+                kind,
+                name,
+                namespace,
+            })
+            .await
+            .map(StructuredContent)
+    }
+
+    /// Wait for a Deployment, StatefulSet, or DaemonSet rollout to complete.
+    async fn wait_rollout(
+        &self,
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+        timeout_seconds: Option<u64>,
+        interval_seconds: Option<u64>,
+    ) -> Result<StructuredContent<WaitRolloutResponse>, KubeviewError> {
+        self.reader
+            .wait_rollout(WaitRolloutInput {
+                kind,
+                name,
+                namespace,
+                timeout_seconds,
+                interval_seconds,
+            })
+            .await
+            .map(StructuredContent)
+    }
+
+    /// Trace a Service to EndpointSlices and selected Pods.
+    async fn trace_service(
+        &self,
+        name: String,
+        namespace: Option<String>,
+    ) -> Result<StructuredContent<TraceServiceResponse>, KubeviewError> {
+        self.reader
+            .trace_service(TraceServiceInput { name, namespace })
+            .await
+            .map(StructuredContent)
+    }
+
+    /// List Jobs and their completion state.
+    async fn list_jobs(
+        &self,
+        namespace: Option<String>,
+        all_namespaces: Option<bool>,
+        label_selector: Option<String>,
+        field_selector: Option<String>,
+    ) -> Result<StructuredContent<JobsResponse>, KubeviewError> {
+        self.reader
+            .list_jobs(ListJobsInput {
+                namespace,
+                all_namespaces: all_namespaces.unwrap_or(false),
+                label_selector,
+                field_selector,
+            })
+            .await
+            .map(StructuredContent)
+    }
+
+    /// List CronJobs and their recent scheduling state.
+    async fn list_cronjobs(
+        &self,
+        namespace: Option<String>,
+        all_namespaces: Option<bool>,
+        label_selector: Option<String>,
+        field_selector: Option<String>,
+    ) -> Result<StructuredContent<CronJobsResponse>, KubeviewError> {
+        self.reader
+            .list_cronjobs(ListCronJobsInput {
+                namespace,
+                all_namespaces: all_namespaces.unwrap_or(false),
+                label_selector,
+                field_selector,
+            })
+            .await
+            .map(StructuredContent)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +332,53 @@ pub struct GetResourceInput {
     pub kind: String,
     pub name: String,
     pub namespace: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListEventsInput {
+    pub namespace: Option<String>,
+    pub all_namespaces: bool,
+    pub involved_kind: Option<String>,
+    pub involved_name: Option<String>,
+    pub type_: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetRolloutStatusInput {
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitRolloutInput {
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+    pub timeout_seconds: Option<u64>,
+    pub interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceServiceInput {
+    pub name: String,
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListJobsInput {
+    pub namespace: Option<String>,
+    pub all_namespaces: bool,
+    pub label_selector: Option<String>,
+    pub field_selector: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListCronJobsInput {
+    pub namespace: Option<String>,
+    pub all_namespaces: bool,
+    pub label_selector: Option<String>,
+    pub field_selector: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -261,6 +441,168 @@ pub struct ResourcesResponse {
     pub kind: String,
     pub namespace: Option<String>,
     pub items: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EventsResponse {
+    pub namespace: Option<String>,
+    pub events: Vec<EventSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EventSummary {
+    pub name: String,
+    pub namespace: Option<String>,
+    pub type_: Option<String>,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub count: Option<i32>,
+    pub first_timestamp: Option<String>,
+    pub last_timestamp: Option<String>,
+    pub involved_kind: Option<String>,
+    pub involved_name: Option<String>,
+    pub reporting_component: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RolloutStatusResponse {
+    pub kind: String,
+    pub name: String,
+    pub namespace: String,
+    pub complete: bool,
+    pub message: String,
+    pub desired_replicas: i32,
+    pub updated_replicas: i32,
+    pub ready_replicas: i32,
+    pub available_replicas: i32,
+    pub unavailable_replicas: i32,
+    pub observed_generation: Option<i64>,
+    pub generation: Option<i64>,
+    pub conditions: Vec<ConditionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConditionSummary {
+    pub type_: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WaitRolloutResponse {
+    pub status: RolloutStatusResponse,
+    pub completed: bool,
+    pub timed_out: bool,
+    pub elapsed_seconds: u64,
+    pub observations: Vec<RolloutObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RolloutObservation {
+    pub elapsed_seconds: u64,
+    pub complete: bool,
+    pub message: String,
+    pub updated_replicas: i32,
+    pub ready_replicas: i32,
+    pub available_replicas: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TraceServiceResponse {
+    pub namespace: String,
+    pub service: ServiceTraceSummary,
+    pub endpoint_slices: Vec<EndpointSliceSummary>,
+    pub endpoints: EndpointTotals,
+    pub selected_pods: Vec<PodSummary>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceTraceSummary {
+    pub name: String,
+    pub type_: Option<String>,
+    pub cluster_ip: Option<String>,
+    pub selector: Option<std::collections::BTreeMap<String, String>>,
+    pub ports: Vec<ServicePortSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServicePortSummary {
+    pub name: Option<String>,
+    pub port: i32,
+    pub target_port: Option<String>,
+    pub protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EndpointSliceSummary {
+    pub name: String,
+    pub address_type: String,
+    pub endpoints: Vec<EndpointSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EndpointSummary {
+    pub addresses: Vec<String>,
+    pub ready: bool,
+    pub serving: bool,
+    pub terminating: bool,
+    pub target_kind: Option<String>,
+    pub target_name: Option<String>,
+    pub node_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EndpointTotals {
+    pub total: usize,
+    pub ready: usize,
+    pub serving: usize,
+    pub terminating: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct JobsResponse {
+    pub namespace: Option<String>,
+    pub jobs: Vec<JobSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct JobSummary {
+    pub name: String,
+    pub namespace: Option<String>,
+    pub active: i32,
+    pub ready: i32,
+    pub succeeded: i32,
+    pub failed: i32,
+    pub terminating: i32,
+    pub completions: Option<i32>,
+    pub parallelism: Option<i32>,
+    pub suspend: Option<bool>,
+    pub completion_time: Option<String>,
+    pub start_time: Option<String>,
+    pub conditions: Vec<ConditionSummary>,
+    pub owner_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CronJobsResponse {
+    pub namespace: Option<String>,
+    pub cronjobs: Vec<CronJobSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CronJobSummary {
+    pub name: String,
+    pub namespace: Option<String>,
+    pub schedule: String,
+    pub suspend: Option<bool>,
+    pub active: usize,
+    pub active_jobs: Vec<String>,
+    pub last_schedule_time: Option<String>,
+    pub last_successful_time: Option<String>,
+    pub concurrency_policy: Option<String>,
+    pub time_zone: Option<String>,
 }
 
 #[cfg(test)]
@@ -357,6 +699,99 @@ mod tests {
         ) -> Result<serde_json::Value, KubeviewError> {
             Ok(json!({"kind": "Deployment"}))
         }
+
+        async fn list_events(
+            &self,
+            input: ListEventsInput,
+        ) -> Result<EventsResponse, KubeviewError> {
+            Ok(EventsResponse {
+                namespace: input.namespace,
+                events: vec![],
+            })
+        }
+
+        async fn get_rollout_status(
+            &self,
+            input: GetRolloutStatusInput,
+        ) -> Result<RolloutStatusResponse, KubeviewError> {
+            Ok(RolloutStatusResponse {
+                kind: input.kind,
+                name: input.name,
+                namespace: input.namespace.unwrap_or_else(|| "default".to_string()),
+                complete: true,
+                message: "rollout complete".to_string(),
+                desired_replicas: 1,
+                updated_replicas: 1,
+                ready_replicas: 1,
+                available_replicas: 1,
+                unavailable_replicas: 0,
+                observed_generation: Some(1),
+                generation: Some(1),
+                conditions: vec![],
+            })
+        }
+
+        async fn wait_rollout(
+            &self,
+            input: WaitRolloutInput,
+        ) -> Result<WaitRolloutResponse, KubeviewError> {
+            let status = self
+                .get_rollout_status(GetRolloutStatusInput {
+                    kind: input.kind,
+                    name: input.name,
+                    namespace: input.namespace,
+                })
+                .await?;
+            Ok(WaitRolloutResponse {
+                completed: status.complete,
+                timed_out: false,
+                elapsed_seconds: 0,
+                observations: vec![],
+                status,
+            })
+        }
+
+        async fn trace_service(
+            &self,
+            input: TraceServiceInput,
+        ) -> Result<TraceServiceResponse, KubeviewError> {
+            Ok(TraceServiceResponse {
+                namespace: input.namespace.unwrap_or_else(|| "default".to_string()),
+                service: ServiceTraceSummary {
+                    name: input.name,
+                    type_: Some("ClusterIP".to_string()),
+                    cluster_ip: Some("10.0.0.1".to_string()),
+                    selector: None,
+                    ports: vec![],
+                },
+                endpoint_slices: vec![],
+                endpoints: EndpointTotals {
+                    total: 0,
+                    ready: 0,
+                    serving: 0,
+                    terminating: 0,
+                },
+                selected_pods: vec![],
+                warnings: vec![],
+            })
+        }
+
+        async fn list_jobs(&self, input: ListJobsInput) -> Result<JobsResponse, KubeviewError> {
+            Ok(JobsResponse {
+                namespace: input.namespace,
+                jobs: vec![],
+            })
+        }
+
+        async fn list_cronjobs(
+            &self,
+            input: ListCronJobsInput,
+        ) -> Result<CronJobsResponse, KubeviewError> {
+            Ok(CronJobsResponse {
+                namespace: input.namespace,
+                cronjobs: vec![],
+            })
+        }
     }
 
     #[tokio::test]
@@ -389,6 +824,12 @@ mod tests {
             "pod_logs",
             "list_resources",
             "get_resource",
+            "list_events",
+            "get_rollout_status",
+            "wait_rollout",
+            "trace_service",
+            "list_jobs",
+            "list_cronjobs",
         ]);
     }
 
